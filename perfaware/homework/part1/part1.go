@@ -8,97 +8,97 @@ import (
 const DEBUG = false
 
 var RegMap = [16]Register{
-	Register {
+	{
 		name: "al",
 		size: 8,
 		offset: 0,
 		fieldEncoding: 0b000,
 	},
-	Register {
+	{
 		name: "cl",
 		size: 8,
 		offset: 0,
 		fieldEncoding: 0b001,
 	},
-	Register {
+	{
 		name: "dl",
 		size: 8,
 		offset: 0,
 		fieldEncoding: 0b010,
 	},
-	Register {
+	{
 		name: "bl",
 		size: 8,
 		offset: 0,
 		fieldEncoding: 0b011,
 	},
-	Register {
+	{
 		name: "ah",
 		size: 8,
 		offset: 8,
 		fieldEncoding: 0b100,
 	},
-	Register {
+	{
 		name: "ch",
 		size: 8,
 		offset: 8,
 		fieldEncoding: 0b101,
 	},
-	Register {
+	{
 		name: "dh",
 		size: 8,
 		offset: 8,
 		fieldEncoding: 0b110,
 	},
-	Register {
+	{
 		name: "bh",
 		size: 8,
 		offset: 8,
 		fieldEncoding: 0b111,
 	},
-	Register {
+	{
 		name: "ax",
 		size: 16,
 		offset: 0,
 		fieldEncoding: 0b000,
 	},
-	Register {
+	{
 		name: "cx",
 		size: 16,
 		offset: 0,
 		fieldEncoding: 0b001,
 	},
-	Register {
+	{
 		name: "dx",
 		size: 16,
 		offset: 0,
 		fieldEncoding: 0b010,
 	},
-	Register {
+	{
 		name: "bx",
 		size: 16,
 		offset: 0,
 		fieldEncoding: 0b011,
 	},
-	Register {
+	{
 		name: "sp",
 		size: 16,
 		offset: 0,
 		fieldEncoding: 0b100,
 	},
-	Register {
+	{
 		name: "bp",
 		size: 16,
 		offset: 0,
 		fieldEncoding: 0b101,
 	},
-	Register {
+	{
 		name: "si",
 		size: 16,
 		offset: 0,
 		fieldEncoding: 0b110,
 	},
-	Register {
+	{
 		name: "di",
 		size: 16,
 		offset: 0,
@@ -117,15 +117,29 @@ var EffAddrBaseMap = [8]string{
 	"bx",
 }
 
-var ArithmeticVariantLookup = [8]string{
-	"add",
-	"NOT_SUPPORTED",
-	"NOT_SUPPORTED",
-	"NOT_SUPPORTED",
-	"NOT_SUPPORTED",
-	"sub",
-	"NOT_SUPPORTED",
-	"cmp",
+type ArithmeticOpType = uint8
+const (
+	Add ArithmeticOpType = iota
+	NotSupported1
+	NotSupported2
+	NotSupported3
+	NotSupported4
+	Sub
+	NotSupported5
+	Cmp
+)
+
+func getArithmeticOpName(op ArithmeticOpType) string {
+	switch op {
+	case Add:
+		return "add"
+	case Sub:
+		return "sub"
+	case Cmp:
+		return "cmp"
+	default:
+		return "NOT_SUPPORTED"
+	}
 }
 
  type EffectiveAddress struct {
@@ -150,6 +164,11 @@ type Register struct {
 	fieldEncoding uint8
 }
 
+type Flags struct {
+	zero bool
+	sign bool
+}
+
 var registerValues = [8]uint16{
 	0, // "ax",
 	0, // "cx",
@@ -161,6 +180,10 @@ var registerValues = [8]uint16{
 	0,  // "di",
 }
 
+var flagValues =  Flags {
+	false,
+	false,
+}
 func getRegisterValue(reg Register) uint16 {
 	if reg.size == 16 {
 		return registerValues[reg.fieldEncoding]
@@ -183,6 +206,27 @@ func updateRegister(reg Register,  value uint16) {
 		registerValues[reg.fieldEncoding] =  updated
 	}
 }
+
+func executeOp(op ArithmeticOpType, dst Register, other uint16) {
+	current := getRegisterValue(dst)
+	var result uint16
+	switch op {
+	case Add:
+		result = current + other
+		updateRegister(dst, result)
+	case Sub:
+		result = current - other
+		updateRegister(dst, result)
+	case Cmp:
+		result = current - other
+	default:
+		panic(fmt.Sprintf("Unsupported op %x", op))
+	}
+	flagValues.zero = result == 0
+	flagValues.sign = result & 0x8000 > 0
+	printFlags()
+}
+
 
 
 func resolveOther(startIdx int, data []byte, mod byte, rm byte, w bool) (Register, EffectiveAddress, uint8) {
@@ -233,6 +277,14 @@ func getImmediate(startIdx int, data []byte, wide bool) (int16, uint8) {
 	}
 }
 
+func getOtherString(otherReg Register, otherEffAddr EffectiveAddress) string {
+	if otherReg.name ==  "" {
+		return otherEffAddr.String()
+	} else {
+		return otherReg.name
+	}
+}
+
 func acceptRegMemMov(startIdx int, data []byte) (string, uint) {
 	d := data[startIdx]&2 > 0
 	w := data[startIdx]&1 > 0
@@ -242,7 +294,6 @@ func acceptRegMemMov(startIdx int, data []byte) (string, uint) {
 	regBits := (b2 & 0b00111000) >> 3
 
 	var reg Register
-	var other string
 	var bytesConsumed uint8
 	if w {
 		reg = RegMap[uint8(regBits)+8]
@@ -251,11 +302,7 @@ func acceptRegMemMov(startIdx int, data []byte) (string, uint) {
 	}
 	otherReg, otherEffAddr, bytesConsumed := resolveOther(startIdx, data, mod, rm, w)
 	var src, dst string
-	if otherReg.name ==  "" {
-		other = otherEffAddr.String()
-	} else {
-		other = otherReg.name
-	}
+	other := getOtherString(otherReg, otherEffAddr)
 	if d {
 		src = other
 		dst = reg.name
@@ -295,64 +342,70 @@ func acceptImmediateToRegMov(startIdx int, data []byte) (string, uint) {
 	return fmt.Sprintf("mov %s, %d", reg.name, immediate), uint(1 + immediateSize)
 }
 
-// func acceptArithmeticOpRegMem(startIdx int, data []byte) (string, uint) {
-// 	d := data[startIdx]&2 > 0
-// 	w := data[startIdx]&1 > 0
-// 	b2 := data[startIdx+1]
-// 	mod := (b2 & 0b11000000) >> 6
-// 	reg := (b2 & 0b00111000) >> 3
-// 	rm := b2 & 0b00000111
-//
-// 	var reg_str string
-// 	var other string
-// 	var bytesConsumed uint8
-// 	if w {
-// 		reg_str = RegMap[uint8(reg)+8]
-// 	} else {
-// 		reg_str = RegMap[uint8(reg)]
-// 	}
-// 	other, _, bytesConsumed = resolveOther(startIdx, data, mod, rm, w)
-// 	var src, dst string
-// 	if d {
-// 		src = other
-// 		dst = reg_str
-// 	} else {
-// 		src = reg_str
-// 		dst = other
-// 	}
-// 	op := uint8(data[startIdx] & 0b00111000 >> 3)
-// 	asm := fmt.Sprintf("%s %s, %s", ArithmeticVariantLookup[op], dst, src)
-// 	return asm, uint(bytesConsumed)
-// }
-//
-// func acceptArithmeticOpRegMemImmediate(startIdx int, data []byte) (string, uint) {
-// 	s := data[startIdx]&2 > 0
-// 	w := data[startIdx]&1 > 0
-// 	b2 := data[startIdx+1]
-// 	mod := (b2 & 0b11000000) >> 6
-// 	rm := b2 & 0b00000111
-//
-// 	var other string
-// 	var bytesConsumed uint8
-// 	var isEffectiveAddr bool
-// 	other, isEffectiveAddr, bytesConsumed = resolveOther(startIdx, data, mod, rm, w)
-// 	wideImmediate := w && !s
-// 	immediate, im_bytes := getImmediate(startIdx+int(bytesConsumed), data, wideImmediate)
-// 	bytesConsumed += im_bytes
-// 	op := uint8(data[startIdx+1] & 0b00111000 >> 3)
-// 	clarifier := ""
-// 	if w {
-// 		if isEffectiveAddr {
-// 			clarifier = " word"
-// 		}
-// 	} else {
-// 		if isEffectiveAddr {
-// 			clarifier = " byte"
-// 		}
-// 	}
-// 	asm := fmt.Sprintf("%s%s %s, %d", ArithmeticVariantLookup[op], clarifier, other, immediate)
-// 	return asm, uint(bytesConsumed)
-// }
+func acceptArithmeticOpRegMem(startIdx int, data []byte) (string, uint) {
+	d := data[startIdx]&2 > 0
+	w := data[startIdx]&1 > 0
+	b2 := data[startIdx+1]
+	mod := (b2 & 0b11000000) >> 6
+	regBits := (b2 & 0b00111000) >> 3
+	rm := b2 & 0b00000111
+
+	var reg Register
+	var bytesConsumed uint8
+	if w {
+		reg = RegMap[uint8(regBits)+8]
+	} else {
+		reg = RegMap[uint8(regBits)]
+	}
+	op := uint8(data[startIdx] & 0b00111000 >> 3)
+	otherReg, otherEffAddr, bytesConsumed := resolveOther(startIdx, data, mod, rm, w)
+	other := getOtherString(otherReg, otherEffAddr)
+	var src, dst string
+	if d {
+		src = other
+		dst = reg.name
+		if otherReg.name != "" {
+			executeOp(op, reg, getRegisterValue(otherReg))
+		}
+	} else {
+		src = reg.name
+		dst = other
+		if otherReg.name != "" {
+			executeOp(op, otherReg, getRegisterValue(reg))
+		}
+	}
+	asm := fmt.Sprintf("%s %s, %s", getArithmeticOpName(op), dst, src)
+	return asm, uint(bytesConsumed)
+}
+
+func acceptArithmeticOpRegMemImmediate(startIdx int, data []byte) (string, uint) {
+	s := data[startIdx]&2 > 0
+	w := data[startIdx]&1 > 0
+	b2 := data[startIdx+1]
+	mod := (b2 & 0b11000000) >> 6
+	rm := b2 & 0b00000111
+
+	var dst string
+	var bytesConsumed uint8
+	dstReg, otherEffAddr, bytesConsumed := resolveOther(startIdx, data, mod, rm, w)
+	wideImmediate := w && !s
+	immediate, imNumBytes := getImmediate(startIdx+int(bytesConsumed), data, wideImmediate)
+	bytesConsumed += imNumBytes
+	op := uint8(data[startIdx+1] & 0b00111000 >> 3)
+	clarifier := ""
+	if otherEffAddr.base != "" || otherEffAddr.disp != 0 {
+		if w {
+			clarifier = " word"
+		} else {
+			clarifier = " byte"
+		}
+	} else {
+		executeOp(op, dstReg, uint16(immediate))
+	}
+	fmt.Println(getArithmeticOpName(op))
+	asm := fmt.Sprintf("%s%s %s, %d", getArithmeticOpName(op), clarifier, dst, immediate)
+	return asm, uint(bytesConsumed)
+}
 //
 // func acceptArithmeticOpImmediateAcc(startIdx int, data []byte) (string, uint) {
 // 	w := data[startIdx]&1 > 0
@@ -391,12 +444,12 @@ func decode(filename string) {
 			asm, bytesConsumed = acceptRegMemMov(i, data)
 		} else if (0b10110000^data[i])&0b11110000 == 0 {
 			asm, bytesConsumed = acceptImmediateToRegMov(i, data)
-		// } else if (0b00000000^data[i])&0b11111100 == 0 ||
-		// 	(0b00101000^data[i])&0b11111100 == 0 ||
-		// 	(0b00111000^data[i])&0b11111100 == 0 {
-		// 	asm, bytesConsumed = acceptArithmeticOpRegMem(i, data)
-		// } else if (0b10000000^data[i])&0b11111100 == 0 {
-		// 	asm, bytesConsumed = acceptArithmeticOpRegMemImmediate(i, data)
+		} else if (0b00000000^data[i])&0b11111100 == 0 ||
+			(0b00101000^data[i])&0b11111100 == 0 ||
+			(0b00111000^data[i])&0b11111100 == 0 {
+			asm, bytesConsumed = acceptArithmeticOpRegMem(i, data)
+		} else if (0b10000000^data[i])&0b11111100 == 0 {
+			asm, bytesConsumed = acceptArithmeticOpRegMemImmediate(i, data)
 		// } else if (0b00000100^data[i])&0b11111110 == 0 ||
 		// 	(0b00101100^data[i])&0b11111110 == 0 ||
 		// 	(0b00111100^data[i])&0b11111110 == 0 {
@@ -461,6 +514,16 @@ func decode(filename string) {
 
 }
 
+func printFlags() {
+	if flagValues.zero {
+		fmt.Printf("S")
+	}
+	if flagValues.zero {
+		fmt.Printf("Z")
+	}
+}
+
+
 func main() {
 	if len(os.Args) < 2 {
 		fmt.Println("Usage: go run part1.go <filename>")
@@ -469,12 +532,31 @@ func main() {
 	filename := os.Args[1]
 	decode(filename)
 	fmt.Printf("Final registers:\n")
-	fmt.Printf("      ax: 0x%04X (%d)\n", registerValues[0], registerValues[0])
-	fmt.Printf("      bx: 0x%04X (%d)\n", registerValues[3], registerValues[3])
-	fmt.Printf("      cx: 0x%04X (%d)\n", registerValues[1], registerValues[1])
-	fmt.Printf("      dx: 0x%04X (%d)\n", registerValues[2], registerValues[2])
-	fmt.Printf("      sp: 0x%04X (%d)\n", registerValues[4], registerValues[4])
-	fmt.Printf("      bp: 0x%04X (%d)\n", registerValues[5], registerValues[5])
-	fmt.Printf("      si: 0x%04X (%d)\n", registerValues[6], registerValues[6])
-	fmt.Printf("      di: 0x%04X (%d)\n", registerValues[7], registerValues[7])
+	if registerValues[0] != 0 {
+		fmt.Printf("      ax: 0x%04X (%d)\n", registerValues[0], registerValues[0])
+	}
+	if registerValues[3] != 0 {
+		fmt.Printf("      bx: 0x%04X (%d)\n", registerValues[3], registerValues[3])
+	}
+	if registerValues[1] != 0 {
+		fmt.Printf("      cx: 0x%04X (%d)\n", registerValues[1], registerValues[1])
+	}
+	if registerValues[2] != 0 {
+		fmt.Printf("      dx: 0x%04X (%d)\n", registerValues[2], registerValues[2])
+	}
+	if registerValues[4] != 0 {
+		fmt.Printf("      sp: 0x%04X (%d)\n", registerValues[4], registerValues[4])
+	}
+	if registerValues[5] != 0 {
+		fmt.Printf("      bp: 0x%04X (%d)\n", registerValues[5], registerValues[5])
+	}
+	if registerValues[6] != 0 {
+		fmt.Printf("      si: 0x%04X (%d)\n", registerValues[6], registerValues[6])
+	}
+	if registerValues[7] != 0 {
+		fmt.Printf("      di: 0x%04X (%d)\n", registerValues[7], registerValues[7])
+	}
+	fmt.Printf("   flags: ")
+	printFlags()
+
 }
