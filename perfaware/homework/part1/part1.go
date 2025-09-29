@@ -129,6 +129,67 @@ const (
 	Cmp
 )
 
+type JmpOpType = uint8
+const (
+	JE JmpOpType = iota
+	JL
+	JLE
+	JB
+	JBE
+	JP
+	JO
+	JS
+	JNZ
+	JNL
+	JG
+	JNB
+	JA
+	JNP
+	JNO
+	JNS
+	LOOP
+	LOOPZ
+	LOOPNZ
+	JCXZ
+)
+var jumpOpName = [20]string {
+	"je",
+	"jl",
+	"jle",
+	"jb",
+	"jbe",
+	"jp",
+	"jo",
+	"js",
+	"jnz",
+	"jnl",
+	"jg",
+	"jnb",
+	"ja",
+	"jnp",
+	"jno",
+	"jns",
+	"loop",
+	"loopz",
+	"loopnz",
+	"jcxz",
+}
+
+func getJumpOpName(op JumpOp) string {
+	return jumpOpName[op.opType]
+}
+
+type JumpOp struct {
+	opType JmpOpType
+	disp uint16
+	size uint8
+}
+
+func (op JumpOp) String() string {
+	return fmt.Sprintf("%s %d", getJumpOpName(op), op.disp)
+}
+
+
 func getArithmeticOpName(op ArithmeticOpType) string {
 	switch op {
 	case Add:
@@ -184,6 +245,9 @@ var flagValues =  Flags {
 	false,
 	false,
 }
+
+var ip uint16;
+
 func getRegisterValue(reg Register) uint16 {
 	if reg.size == 16 {
 		return registerValues[reg.fieldEncoding]
@@ -224,12 +288,11 @@ func executeOp(op ArithmeticOpType, dst Register, other uint16) {
 	}
 	flagValues.zero = result == 0
 	flagValues.sign = result & 0x8000 > 0
-	printFlags()
 }
 
 
 
-func resolveOther(startIdx int, data []byte, mod byte, rm byte, w bool) (Register, EffectiveAddress, uint8) {
+func resolveOther(startIdx uint16, data []byte, mod byte, rm byte, w bool) (Register, EffectiveAddress, uint8) {
 	var otherReg Register
 	var otherEffAddr EffectiveAddress
 	var bytesConsumed uint8
@@ -269,11 +332,11 @@ func resolveOther(startIdx int, data []byte, mod byte, rm byte, w bool) (Registe
 	return otherReg, otherEffAddr, bytesConsumed
 }
 
-func getImmediate(startIdx int, data []byte, wide bool) (int16, uint8) {
+func getImmediate(startIdx uint16, data []byte, wide bool) (uint16, uint8) {
 	if wide {
-		return int16(uint16(data[startIdx+1])<<8 | uint16(data[startIdx])), 2
+		return uint16(uint16(data[startIdx+1])<<8 | uint16(data[startIdx])), 2
 	} else {
-		return int16(int8(data[startIdx])), 1
+		return uint16(int8(data[startIdx])), 1
 	}
 }
 
@@ -285,7 +348,7 @@ func getOtherString(otherReg Register, otherEffAddr EffectiveAddress) string {
 	}
 }
 
-func acceptRegMemMov(startIdx int, data []byte) (string, uint) {
+func acceptRegMemMov(startIdx uint16, data []byte) (string, uint) {
 	d := data[startIdx]&2 > 0
 	w := data[startIdx]&1 > 0
 	b2 := data[startIdx+1]
@@ -326,7 +389,7 @@ func acceptRegMemMov(startIdx int, data []byte) (string, uint) {
 	return asm, uint(bytesConsumed)
 }
 
-func acceptImmediateToRegMov(startIdx int, data []byte) (string, uint) {
+func acceptImmediateToRegMov(startIdx uint16, data []byte) (string, uint) {
 	w := data[startIdx]&8 > 0
 	regBits := data[startIdx] & 0b00000111
 
@@ -342,7 +405,7 @@ func acceptImmediateToRegMov(startIdx int, data []byte) (string, uint) {
 	return fmt.Sprintf("mov %s, %d", reg.name, immediate), uint(1 + immediateSize)
 }
 
-func acceptArithmeticOpRegMem(startIdx int, data []byte) (string, uint) {
+func acceptArithmeticOpRegMem(startIdx uint16, data []byte) (string, uint) {
 	d := data[startIdx]&2 > 0
 	w := data[startIdx]&1 > 0
 	b2 := data[startIdx+1]
@@ -375,21 +438,21 @@ func acceptArithmeticOpRegMem(startIdx int, data []byte) (string, uint) {
 		}
 	}
 	asm := fmt.Sprintf("%s %s, %s", getArithmeticOpName(op), dst, src)
+	printFlags()
 	return asm, uint(bytesConsumed)
 }
 
-func acceptArithmeticOpRegMemImmediate(startIdx int, data []byte) (string, uint) {
+func acceptArithmeticOpRegMemImmediate(startIdx uint16, data []byte) (string, uint) {
 	s := data[startIdx]&2 > 0
 	w := data[startIdx]&1 > 0
 	b2 := data[startIdx+1]
 	mod := (b2 & 0b11000000) >> 6
 	rm := b2 & 0b00000111
 
-	var dst string
 	var bytesConsumed uint8
 	dstReg, otherEffAddr, bytesConsumed := resolveOther(startIdx, data, mod, rm, w)
 	wideImmediate := w && !s
-	immediate, imNumBytes := getImmediate(startIdx+int(bytesConsumed), data, wideImmediate)
+	immediate, imNumBytes := getImmediate(startIdx+uint16(bytesConsumed), data, wideImmediate)
 	bytesConsumed += imNumBytes
 	op := uint8(data[startIdx+1] & 0b00111000 >> 3)
 	clarifier := ""
@@ -402,12 +465,12 @@ func acceptArithmeticOpRegMemImmediate(startIdx int, data []byte) (string, uint)
 	} else {
 		executeOp(op, dstReg, uint16(immediate))
 	}
-	fmt.Println(getArithmeticOpName(op))
-	asm := fmt.Sprintf("%s%s %s, %d", getArithmeticOpName(op), clarifier, dst, immediate)
+	asm := fmt.Sprintf("%s%s %s, %d", getArithmeticOpName(op), clarifier, dstReg.name, immediate)
+	printFlags()
 	return asm, uint(bytesConsumed)
 }
 //
-// func acceptArithmeticOpImmediateAcc(startIdx int, data []byte) (string, uint) {
+// func acceptArithmeticOpImmediateAcc(startIdx uint16, data []byte) (string, uint) {
 // 	w := data[startIdx]&1 > 0
 // 	immediate, _ := getImmediate(startIdx+1, data, w)
 // 	op := uint8(data[startIdx] & 0b00111000 >> 3)
@@ -424,10 +487,14 @@ func acceptArithmeticOpRegMemImmediate(startIdx int, data []byte) (string, uint)
 // 	return asm, bytesConsumed
 // }
 
-func acceptCondJump(startIdx int, data []byte, jumpVariant string) (string, uint) {
-	displacement := int8(data[startIdx+1])
-	asm := fmt.Sprintf("%s %d", jumpVariant, displacement)
-	return asm, 2
+func acceptCondJump(startIdx uint16, data []byte, opType JmpOpType) JumpOp {
+	displacement := uint16(int8(data[startIdx+1]))
+	op := JumpOp {
+		opType,
+		displacement,
+		2,
+	}
+	return op
 }
 
 func decode(filename string) {
@@ -437,85 +504,100 @@ func decode(filename string) {
 		return
 	}
 	fmt.Printf("bits 16\n\n")
-	for i := 0; i < len(data); {
+	streamSize := uint16(len(data))
+	for ip < streamSize {
+		var jmpOp JumpOp
 		var asm string
 		var bytesConsumed uint
-		if (0b10001000^data[i])&0b11111100 == 0 {
-			asm, bytesConsumed = acceptRegMemMov(i, data)
-		} else if (0b10110000^data[i])&0b11110000 == 0 {
-			asm, bytesConsumed = acceptImmediateToRegMov(i, data)
-		} else if (0b00000000^data[i])&0b11111100 == 0 ||
-			(0b00101000^data[i])&0b11111100 == 0 ||
-			(0b00111000^data[i])&0b11111100 == 0 {
-			asm, bytesConsumed = acceptArithmeticOpRegMem(i, data)
-		} else if (0b10000000^data[i])&0b11111100 == 0 {
-			asm, bytesConsumed = acceptArithmeticOpRegMemImmediate(i, data)
-		// } else if (0b00000100^data[i])&0b11111110 == 0 ||
-		// 	(0b00101100^data[i])&0b11111110 == 0 ||
-		// 	(0b00111100^data[i])&0b11111110 == 0 {
-		// 	asm, bytesConsumed = acceptArithmeticOpImmediateAcc(i, data)
-		} else if data[i] == 0b01110100 {
-			asm, bytesConsumed = acceptCondJump(i, data, "je")
-		} else if data[i] == 0b01111100 {
-			asm, bytesConsumed = acceptCondJump(i, data, "jl")
-		} else if data[i] == 0b01111110 {
-			asm, bytesConsumed = acceptCondJump(i, data, "jle")
-		} else if data[i] == 0b01110010 {
-			asm, bytesConsumed = acceptCondJump(i, data, "jb")
-		} else if data[i] == 0b01110110 {
-			asm, bytesConsumed = acceptCondJump(i, data, "jbe")
-		} else if data[i] == 0b01111010 {
-			asm, bytesConsumed = acceptCondJump(i, data, "jp")
-		} else if data[i] == 0b01110000 {
-			asm, bytesConsumed = acceptCondJump(i, data, "jo")
-		} else if data[i] == 0b01111000 {
-			asm, bytesConsumed = acceptCondJump(i, data, "js")
-		} else if data[i] == 0b01110101 {
-			asm, bytesConsumed = acceptCondJump(i, data, "jnz")
-		} else if data[i] == 0b01111101 {
-			asm, bytesConsumed = acceptCondJump(i, data, "jnl")
-		} else if data[i] == 0b01111111 {
-			asm, bytesConsumed = acceptCondJump(i, data, "jg")
-		} else if data[i] == 0b01110011 {
-			asm, bytesConsumed = acceptCondJump(i, data, "jnb")
-		} else if data[i] == 0b01110111 {
-			asm, bytesConsumed = acceptCondJump(i, data, "ja")
-		} else if data[i] == 0b01111011 {
-			asm, bytesConsumed = acceptCondJump(i, data, "jnp")
-		} else if data[i] == 0b01110001 {
-			asm, bytesConsumed = acceptCondJump(i, data, "jno")
-		} else if data[i] == 0b01111001 {
-			asm, bytesConsumed = acceptCondJump(i, data, "jns")
-		} else if data[i] == 0b11100010 {
-			asm, bytesConsumed = acceptCondJump(i, data, "loop")
-		} else if data[i] == 0b11100001 {
-			asm, bytesConsumed = acceptCondJump(i, data, "loopz")
-		} else if data[i] == 0b11100000 {
-			asm, bytesConsumed = acceptCondJump(i, data, "loopnz")
-		} else if data[i] == 0b11100011 {
-			asm, bytesConsumed = acceptCondJump(i, data, "jcxz")
+		if (0b10001000^data[ip])&0b11111100 == 0 {
+			asm, bytesConsumed = acceptRegMemMov(ip, data)
+		} else if (0b10110000^data[ip])&0b11110000 == 0 {
+			asm, bytesConsumed = acceptImmediateToRegMov(ip, data)
+		} else if (0b00000000^data[ip])&0b11111100 == 0 ||
+			(0b00101000^data[ip])&0b11111100 == 0 ||
+			(0b00111000^data[ip])&0b11111100 == 0 {
+			asm, bytesConsumed = acceptArithmeticOpRegMem(ip, data)
+		} else if (0b10000000^data[ip])&0b11111100 == 0 {
+			asm, bytesConsumed = acceptArithmeticOpRegMemImmediate(ip, data)
+		// } else if (0b00000100^data[ip])&0b11111110 == 0 ||
+		// 	(0b00101100^data[ip])&0b11111110 == 0 ||
+		// 	(0b00111100^data[ip])&0b11111110 == 0 {
+		// 	asm, bytesConsumed = acceptArithmeticOpImmediateAcc(ip, data)
+		} else if data[ip] == 0b01110100 {
+			jmpOp = acceptCondJump(ip, data, JE)
+		} else if data[ip] == 0b01111100 {
+			jmpOp = acceptCondJump(ip, data, JL)
+		} else if data[ip] == 0b01111110 {
+			jmpOp = acceptCondJump(ip, data, JLE)
+		} else if data[ip] == 0b01110010 {
+			jmpOp = acceptCondJump(ip, data, JB)
+		} else if data[ip] == 0b01110110 {
+			jmpOp = acceptCondJump(ip, data, JBE)
+		} else if data[ip] == 0b01111010 {
+			jmpOp = acceptCondJump(ip, data, JP)
+		} else if data[ip] == 0b01110000 {
+			jmpOp = acceptCondJump(ip, data, JO)
+		} else if data[ip] == 0b01111000 {
+			jmpOp = acceptCondJump(ip, data, JS)
+		} else if data[ip] == 0b01110101 {
+			jmpOp = acceptCondJump(ip, data, JNZ)
+		} else if data[ip] == 0b01111101 {
+			jmpOp = acceptCondJump(ip, data, JNL)
+		} else if data[ip] == 0b01111111 {
+			jmpOp = acceptCondJump(ip, data, JG)
+		} else if data[ip] == 0b01110011 {
+			jmpOp = acceptCondJump(ip, data, JNB)
+		} else if data[ip] == 0b01110111 {
+			jmpOp = acceptCondJump(ip, data, JA)
+		} else if data[ip] == 0b01111011 {
+			jmpOp = acceptCondJump(ip, data, JNP)
+		} else if data[ip] == 0b01110001 {
+			jmpOp = acceptCondJump(ip, data, JNO)
+		} else if data[ip] == 0b01111001 {
+			jmpOp = acceptCondJump(ip, data, JNS)
+		} else if data[ip] == 0b11100010 {
+			jmpOp = acceptCondJump(ip, data, LOOP)
+		} else if data[ip] == 0b11100001 {
+			jmpOp = acceptCondJump(ip, data, LOOPZ)
+		} else if data[ip] == 0b11100000 {
+			jmpOp = acceptCondJump(ip, data, LOOPNZ)
+		} else if data[ip] == 0b11100011 {
+			jmpOp = acceptCondJump(ip, data, JCXZ)
 		} else {
-			fmt.Printf("%b\n", data[i])
+			fmt.Printf("%b\n", data[ip])
 			panic("That wasn't supposed to happen")
 		}
-		if DEBUG {
-			for j, b := range data[i : i+int(bytesConsumed)] {
-				if j > 0 {
-					fmt.Print(" ")
-				}
-				fmt.Printf("%08b", b)
-			}
-			fmt.Printf(": %s (%d)\n", asm, bytesConsumed)
+
+		if jmpOp.size != 0 {
+			fmt.Println(jmpOp.String())
 		} else {
 			fmt.Println(asm)
 		}
-		i += int(bytesConsumed)
+		if jmpOp.size != 0 {
+			bytesConsumed = uint(jmpOp.size)
+		}
+		ip += uint16(bytesConsumed)
+		fmt.Printf("Bytes consumed: %d\n", bytesConsumed)
+		if jmpOp.size != 0 {
+			switch (jmpOp.opType) {
+			case JNZ:
+				if !flagValues.zero {
+					fmt.Printf("IP: %d, %x\n", ip, ip)
+					fmt.Printf("disp: %d\n", int(jmpOp.disp))
+					ip += uint16(jmpOp.disp)
+					fmt.Printf("IP: %d, %x\n", ip, ip)
+				}
+			default:
+				panic("Not implemented")
+			}
+		}
+		fmt.Printf("IP: %d\n", ip)
 	}
 
 }
 
 func printFlags() {
-	if flagValues.zero {
+	if flagValues.sign {
 		fmt.Printf("S")
 	}
 	if flagValues.zero {
@@ -556,7 +638,7 @@ func main() {
 	if registerValues[7] != 0 {
 		fmt.Printf("      di: 0x%04X (%d)\n", registerValues[7], registerValues[7])
 	}
+	fmt.Printf("      ip: 0x%04X (%d)\n", ip, ip)
 	fmt.Printf("   flags: ")
 	printFlags()
-
 }
