@@ -74,19 +74,13 @@ func (op ArithmeticOp) String() string {
 	}
 	switch op.variant {
 		case REG_REG:
-			if op.dest {
-				return fmt.Sprintf("%s %s, %s", opMnemonic, op.reg.name, op.otherReg.name)
-			} else {
-				return fmt.Sprintf("%s %s, %s", opMnemonic, op.otherReg.name, op.reg.name)
-			}
+			return fmt.Sprintf("%s %s, %s", opMnemonic, op.reg.name, op.otherReg.name)
 		case REG_MEM:
-			if op.dest {
-				return fmt.Sprintf("%s %s, %s", opMnemonic, op.reg.name, op.otherEffAddr.String())
-			} else {
-				return fmt.Sprintf("%s %s, %s", opMnemonic, op.otherEffAddr.String(), op.reg.name)
-			}
+			return fmt.Sprintf("%s %s, %s", opMnemonic, op.reg.name, op.otherEffAddr.String())
+		case MEM_REG:
+			return fmt.Sprintf("%s %s, %s", opMnemonic, op.otherEffAddr.String(), op.reg.name)
 		case REG_IMM:
-			return fmt.Sprintf("%s %s, %d", opMnemonic, op.reg.name, op.otherImmediate)
+			return fmt.Sprintf("%s %s, %d", opMnemonic, op.reg.name, op.otherImmediate.value)
 		case MEM_IMM:
 			clarifier := ""
 			if op.wide {
@@ -97,6 +91,54 @@ func (op ArithmeticOp) String() string {
 			return fmt.Sprintf("%s%s %s, %d", opMnemonic, clarifier, op.otherEffAddr.String(), op.otherImmediate)
 		default:
 			panic("Unexpected Error")
+	}
+}
+
+func (op ArithmeticOp) execute() {
+	var operand1 uint16
+	var operand2 uint16
+	var result uint16
+	switch op.variant {
+		case REG_REG:
+			operand1 = getRegisterValue(op.reg)
+			operand2 = getRegisterValue(op.otherReg)
+			result = doOp(op.opType, operand1, operand2)
+			updateRegister(op.reg, result)
+		case REG_MEM:
+			operand1 = getRegisterValue(op.reg)
+			operand2 = getRegisterValue(op.otherReg)
+			result = doOp(op.opType, operand1, operand2)
+			updateRegister(op.reg, result)
+		case MEM_REG:
+			operand1 = getRegisterValue(op.reg)
+			operand2 = getRegisterValue(op.otherReg)
+			result = doOp(op.opType, operand1, operand2)
+		case REG_IMM:
+			operand1 = getRegisterValue(op.reg)
+			operand2 = op.otherImmediate.value
+			result = doOp(op.opType, operand1, operand2)
+			updateRegister(op.reg, result)
+		case MEM_IMM:
+			operand1 = getRegisterValue(op.reg)
+			operand2 = op.otherImmediate.value
+			result = doOp(op.opType, operand1, operand2)
+		default:
+			panic("Unexpected Error")
+	}
+	flagValues.zero = result == 0
+	flagValues.sign = result & 0x8000 > 0
+}
+
+func doOp(opType ArithmeticOpType, lhs uint16, rhs uint16) uint16 {
+	switch opType {
+		case Add:
+			return lhs + rhs
+		case Sub:
+			return lhs - rhs
+		case Cmp:
+			return lhs - rhs
+		default:
+			panic(fmt.Sprintf("Unsupported opType %x", opType))
 	}
 }
 
@@ -346,24 +388,6 @@ func updateRegister(reg Register,  value uint16) {
 	}
 }
 
-func executeArithmeticOp(op ArithmeticOp) {
-	current := getRegisterValue(dst)
-	var result uint16
-	switch op {
-	case Add:
-		result = current + other
-		updateRegister(dst, result)
-	case Sub:
-		result = current - other
-		updateRegister(dst, result)
-	case Cmp:
-		result = current - other
-	default:
-		panic(fmt.Sprintf("Unsupported op %x", op))
-	}
-	flagValues.zero = result == 0
-	flagValues.sign = result & 0x8000 > 0
-}
 
 func resolveOther(startIdx uint16, data []byte, mod byte, rm byte, w bool) (Register, EffectiveAddress) {
 	var otherReg Register
@@ -614,10 +638,9 @@ func acceptArithmeticOpRegMemImmediate(startIdx uint16, data []byte) ArithmeticO
 	mod := (b2 & 0b11000000) >> 6
 	rm := b2 & 0b00000111
 
-	var bytesConsumed uint8
 	dstReg, otherEffAddr := resolveOther(startIdx, data, mod, rm, w)
 	wideImmediate := w && !s
-	immediate := getImmediate(startIdx+uint16(bytesConsumed), data, wideImmediate)
+	immediate := getImmediate(startIdx + 2 + uint16(otherEffAddr.dispSize) , data, wideImmediate)
 	opType := uint8(data[startIdx+1] & 0b00111000 >> 3)
 	var op ArithmeticOp
 	if dstReg.name !=  "" {
@@ -648,10 +671,12 @@ func acceptArithmeticOpRegMemImmediate(startIdx uint16, data []byte) ArithmeticO
 
 func acceptArithmeticOpImmediateAcc(startIdx uint16, data []byte) ArithmeticOp {
 	w := data[startIdx]&1 > 0
+	fmt.Printf("Byte 1: %b", data[startIdx])
+	fmt.Printf("Byte 2: %b", data[startIdx + 1])
 	immediate := getImmediate(startIdx+1, data, w)
 	opType := uint8(data[startIdx] & 0b00111000 >> 3)
 	var reg Register
-	regIdx := 0 // A register
+	regIdx := 0 // Index of the A register
 	if w {
 		reg = RegMap[regIdx + 8]
 	} else {
@@ -687,6 +712,7 @@ func decode(filename string) {
 	}
 	fmt.Printf("bits 16\n\n")
 	streamSize := uint16(len(data))
+	i := 0
 	for ip < streamSize {
 		var jmpOp JumpOp
 		var movOp MovOp
@@ -765,7 +791,6 @@ func decode(filename string) {
 			panic(fmt.Sprintf("Unmatched op: %b\n", data[ip]))
 		}
 		ip += uint16(bytesConsumed)
-		// fmt.Printf("Bytes consumed: %d\n", bytesConsumed)
 		if jmpOp.size != 0 {
 			jmpOp.execute()
 		} else if movOp.size != 0 {
@@ -776,7 +801,8 @@ func decode(filename string) {
 			fmt.Printf("%b\n", data[ip])
 			panic(fmt.Sprintf("Unmatched op: %b\n", data[ip]))
 		}
-		// fmt.Printf("IP: %d\n", ip)
+		fmt.Printf("IP: %d\n", ip)
+		i++
 	}
 
 }
@@ -826,4 +852,5 @@ func main() {
 	fmt.Printf("      ip: 0x%04X (%d)\n", ip, ip)
 	fmt.Printf("   flags: ")
 	printFlags()
+	fmt.Println()
 }
