@@ -21,18 +21,37 @@ type Flags struct {
 
 type EffectiveAddress struct {
 	 base string
+	 reg1 Register
+	 reg2 Register
 	 disp uint16
 	 dispSize uint8
 }
 
-func (ea EffectiveAddress) String() string {
-	if ea.base == "" {
-		return fmt.Sprintf("[%d]", ea.disp)
-	} else if ea.disp == 0 {
-		return fmt.Sprintf("[%s]", ea.base)
-	} else {
-		return fmt.Sprintf("[%s + %d]", ea.base, ea.disp)
+func (ea EffectiveAddress) ResolveMemoryAddress() uint16 {
+	var index uint16 = 0
+	if ea.reg1.name != "" {
+		index += getRegisterValue(ea.reg1)
+		if ea.reg2.name != "" {
+			index += getRegisterValue(ea.reg2)
+		}
 	}
+	index += ea.disp
+	return index
+}
+
+func (ea EffectiveAddress) String() string {
+	s := "["
+	if ea.reg1.name != "" {
+		s += ea.reg1.name
+		if ea.reg2.name != "" {
+			s +=  fmt.Sprintf("+ %s", ea.reg2.name)
+		}
+	}
+	if ea.dispSize > 0 {
+		s += fmt.Sprintf("+ %d", ea.disp)
+	}
+	s += "]"
+	return s
 }
 
 
@@ -292,15 +311,15 @@ var RegMap = [16]Register{
 	},
 }
 
-var EffAddrBaseMap = [8]string{
-	"bx + si",
-	"bx + di",
-	"bp + si",
-	"bp + di",
-	"si",
-	"di",
-	"bp",
-	"bx",
+var EffAddrRegisters = [8][2]Register{
+	{RegMap[0b1011], RegMap[0b1110]}, // bx + si
+	{RegMap[0b1011], RegMap[0b1111]}, // bx + di
+	{RegMap[0b1101], RegMap[0b1110]}, // bp + si
+	{RegMap[0b1101], RegMap[0b1111]}, // bp + di
+	{RegMap[0b1110], Register{}}, // si
+	{RegMap[0b1111], Register{}}, // di
+	{RegMap[0b1101], Register{}}, // bp
+	{RegMap[0b1011], Register{}}, // bx
 }
 
 var jumpOpName = [20]string {
@@ -354,15 +373,39 @@ var ip uint16;
 
 var memory = [65536]byte{}
 
-func load(memIdx int16) (byte, byte)  {
-	return memory[memIdx] , memory[memIdx+1 % 65536]
+func load(memIdx uint16, numBytes uint8) uint16  {
+	if numBytes == 1 {
+		if DEBUG {
+			fmt.Printf("Loaded 1 byte from %d: %b\n", memIdx, uint16(memory[memIdx]))
+		}
+		return uint16(memory[memIdx])
+	} else {
+		if DEBUG {
+			fmt.Printf("Loaded from %d: %b\n", memIdx, memory[memIdx])
+			fmt.Printf("Loaded from %d: %b\n", memIdx + 1, memory[uint16(memIdx + 1) % 65535])
+		}
+		// Do the endian-aware construction here
+		return uint16(memory[uint16(memIdx + 1) % 65535]) << 8 | uint16(memory[memIdx])
+	}
 }
 
-// func store(memIdx int16, , word bool) {
-// 	if word {
-// 	} else {
-// 	}
-// }
+func store(memIdx uint16, val uint16, word bool) {
+	if word {
+		bl := byte(val&0x00FF)
+		bh := byte(val&0xFF00)
+		if DEBUG {
+			fmt.Printf("  Storing at %d...%d: %b %b", memIdx, memIdx+2, bl, bh)
+		}
+		memory[memIdx] = bl
+		memory[memIdx + 1] = bh
+	} else {
+		bl := byte(val&0x00FF)
+		if DEBUG {
+			fmt.Printf("  Storing at %d: %b", memIdx, bl)
+		}
+		memory[memIdx] = bl
+	}
+}
 
 
 func getRegisterValue(reg Register) uint16 {
@@ -392,25 +435,25 @@ func updateRegister(reg Register,  value uint16) {
 func resolveOther(startIdx uint16, data []byte, mod byte, rm byte, w bool) (Register, EffectiveAddress) {
 	var otherReg Register
 	var otherEffAddr EffectiveAddress
-	effAddrBase := EffAddrBaseMap[rm]
+	effAddrRegs := EffAddrRegisters[rm]
 	switch mod {
 		case 0:
 			if rm == 6 {
 				dispLo := data[startIdx+2]
 				dispHi := data[startIdx+3]
 				disp := (uint16(dispHi) << 8) | uint16(dispLo)
-				otherEffAddr = EffectiveAddress{ base: "", disp: disp , dispSize: 2}
+				otherEffAddr = EffectiveAddress{ disp: disp , dispSize: 2}
 			} else {
-				otherEffAddr = EffectiveAddress{ base: effAddrBase, disp: 0, dispSize: 0}
+				otherEffAddr = EffectiveAddress{ reg1: effAddrRegs[0], reg2: effAddrRegs[1], disp: 0, dispSize: 0}
 			}
 		case 1:
 			dispLo := uint16(data[startIdx+2])
-			otherEffAddr = EffectiveAddress{ base: effAddrBase, disp: dispLo, dispSize: 1}
+			otherEffAddr = EffectiveAddress{ reg1: effAddrRegs[0], reg2: effAddrRegs[1], disp: dispLo, dispSize: 1}
 		case 2:
 			dispLo := data[startIdx+2]
 			dispHi := data[startIdx+3]
 			disp := (uint16(dispHi) << 8) | uint16(dispLo)
-			otherEffAddr = EffectiveAddress{ base: effAddrBase, disp: disp, dispSize:2}
+			otherEffAddr = EffectiveAddress{ reg1: effAddrRegs[0], reg2: effAddrRegs[1], disp: disp, dispSize:2}
 		case 3:
 			if w {
 				otherReg = RegMap[uint8(rm)+8]
@@ -470,7 +513,7 @@ type MovOp struct {
 }
 
 func (op MovOp) String() string {
-	var src, dst string
+	var src, dst, clarifier string
 	switch (op.variant) {
 		case REG_REG:
 			dst = op.reg.name
@@ -484,8 +527,16 @@ func (op MovOp) String() string {
 		case MEM_REG:
 			dst = op.effAddr.String()
 			src = op.reg.name
+		case MEM_IMM:
+			dst = op.effAddr.String()
+			src = fmt.Sprintf("%d", op.immediate.value)
+			if op.immediate.size == 1 {
+				clarifier = " byte"
+			} else {
+				clarifier = " word"
+			}
 	}
-	return fmt.Sprintf("mov %s, %s", src, dst)
+	return fmt.Sprintf("mov%s %s, %s", clarifier, dst, src)
 }
 
 func (op MovOp) execute() {
@@ -493,11 +544,36 @@ func (op MovOp) execute() {
 		case REG_REG:
 			updateRegister(op.reg, getRegisterValue(op.otherReg))
 		case REG_MEM:
-			panic("NOT YET")
+			var memVal uint16
+			if op.reg.size == 8 {
+				memVal = load(op.effAddr.ResolveMemoryAddress(), 1)
+			} else {
+				memVal = load(op.effAddr.ResolveMemoryAddress(), 2)
+			}
+			updateRegister(op.reg, memVal)
 		case REG_IMM:
 			updateRegister(op.reg, op.immediate.value)
 		case MEM_REG:
-			panic("NOT YET")
+			var toStore uint16
+			regVal := getRegisterValue(op.reg)
+			memIdx := op.effAddr.ResolveMemoryAddress()
+			if op.reg.size == 8 {
+				switch op.reg.offset {
+					case 0:
+						toStore = regVal & 0x00FF
+					case 8:
+						toStore = regVal & 0xFF00
+					default:
+						panic(fmt.Sprintf("Invalid register offset. Register: %s, offset: %d", op.reg.name, op.reg.offset))
+				}
+				store(memIdx, toStore, false)
+			} else {
+				toStore = regVal
+				store(memIdx, toStore, true)
+			}
+		case MEM_IMM:
+			memIdx := op.effAddr.ResolveMemoryAddress()
+			store(memIdx, op.immediate.value, op.immediate.size > 1)
 	}
 }
 
@@ -551,6 +627,37 @@ func acceptRegMemMov(startIdx uint16, data []byte) MovOp {
 		}
 	}
 	return op
+}
+
+func acceptMovRegMemImmediate(startIdx uint16, data []byte) MovOp {
+	w := data[startIdx]&1 > 0
+	b2 := data[startIdx+1]
+	mod := (b2 & 0b11000000) >> 6
+	rm := b2 & 0b00000111
+
+	dstReg, otherEffAddr := resolveOther(startIdx, data, mod, rm, w)
+	immediate := getImmediate(startIdx + 2 + uint16(otherEffAddr.dispSize) , data, w)
+	if dstReg.name !=  "" {
+		return MovOp{
+			REG_IMM,
+			w,
+			dstReg,
+			Register{},
+			EffectiveAddress{},
+			immediate,
+			2 + immediate.size,
+		}
+	} else {
+		return MovOp{
+			MEM_IMM,
+			w,
+			Register{},
+			Register{},
+			otherEffAddr,
+			immediate,
+			2 + otherEffAddr.dispSize  + immediate.size,
+		}
+	}
 }
 
 func acceptImmediateToRegMov(startIdx uint16, data []byte) MovOp {
@@ -712,13 +819,15 @@ func decode(filename string) {
 	}
 	fmt.Printf("bits 16\n\n")
 	streamSize := uint16(len(data))
-	i := 0
 	for ip < streamSize {
+		ipStart := ip
 		var jmpOp JumpOp
 		var movOp MovOp
 		var arithmeticOp ArithmeticOp
 		if (0b10001000^data[ip])&0b11111100 == 0 {
 			movOp = acceptRegMemMov(ip, data)
+		} else if (0b11000110^data[ip])&0b11111110 == 0 {
+			movOp = acceptMovRegMemImmediate(ip, data)
 		} else if (0b10110000^data[ip])&0b11110000 == 0 {
 			movOp = acceptImmediateToRegMov(ip, data)
 		} else if (0b00000000^data[ip])&0b11111100 == 0 ||
@@ -778,13 +887,13 @@ func decode(filename string) {
 
 		var bytesConsumed uint
 		if jmpOp.size != 0 {
-			fmt.Println(jmpOp.String())
+			fmt.Printf(jmpOp.String())
 			bytesConsumed += uint(jmpOp.size)
 		} else if movOp.size != 0 {
-			fmt.Println(movOp.String())
+			fmt.Printf(movOp.String())
 			bytesConsumed += uint(movOp.size)
 		} else if arithmeticOp.size != 0 {
-			fmt.Println(arithmeticOp.String())
+			fmt.Printf(arithmeticOp.String())
 			bytesConsumed += uint(arithmeticOp.size)
 		} else {
 			fmt.Printf("%b\n", data[ip])
@@ -801,8 +910,7 @@ func decode(filename string) {
 			fmt.Printf("%b\n", data[ip])
 			panic(fmt.Sprintf("Unmatched op: %b\n", data[ip]))
 		}
-		fmt.Printf("IP: %d\n", ip)
-		i++
+		fmt.Printf(" ; IP: %d->%d\n", ipStart, ip)
 	}
 
 }
