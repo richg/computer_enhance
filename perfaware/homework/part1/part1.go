@@ -122,25 +122,39 @@ func (op ArithmeticOp) execute() {
 			operand1 = getRegisterValue(op.reg)
 			operand2 = getRegisterValue(op.otherReg)
 			result = doOp(op.opType, operand1, operand2)
-			updateRegister(op.reg, result)
+			if op.opType != Cmp {
+				updateRegister(op.reg, result)
+			}
 		case REG_MEM:
 			operand1 = getRegisterValue(op.reg)
-			operand2 = getRegisterValue(op.otherReg)
+			operand2 = load(op.otherEffAddr.ResolveMemoryAddress(), op.reg.size == 16)
 			result = doOp(op.opType, operand1, operand2)
-			updateRegister(op.reg, result)
+			if op.opType != Cmp {
+				updateRegister(op.reg, result)
+			}
 		case MEM_REG:
-			operand1 = getRegisterValue(op.reg)
+			memIdx := op.otherEffAddr.ResolveMemoryAddress()
+			operand1 = load(memIdx, op.reg.size == 16)
 			operand2 = getRegisterValue(op.otherReg)
 			result = doOp(op.opType, operand1, operand2)
+			if op.opType != Cmp {
+				store(memIdx, result, op.reg.size == 16)
+			}
 		case REG_IMM:
 			operand1 = getRegisterValue(op.reg)
 			operand2 = op.otherImmediate.value
 			result = doOp(op.opType, operand1, operand2)
-			updateRegister(op.reg, result)
+			if op.opType != Cmp {
+				updateRegister(op.reg, result)
+			}
 		case MEM_IMM:
-			operand1 = getRegisterValue(op.reg)
+			memIdx := op.otherEffAddr.ResolveMemoryAddress()
+			operand1 = load(memIdx, op.reg.size == 16)
 			operand2 = op.otherImmediate.value
 			result = doOp(op.opType, operand1, operand2)
+			if op.opType != Cmp {
+				store(memIdx, result, op.reg.size == 16)
+			}
 		default:
 			panic("Unexpected Error")
 	}
@@ -373,8 +387,8 @@ var ip uint16;
 
 var memory = [65536]byte{}
 
-func load(memIdx uint16, numBytes uint8) uint16  {
-	if numBytes == 1 {
+func load(memIdx uint16, word bool) uint16  {
+	if !word {
 		if DEBUG {
 			fmt.Printf("Loaded 1 byte from %d: %b\n", memIdx, uint16(memory[memIdx]))
 		}
@@ -412,7 +426,16 @@ func getRegisterValue(reg Register) uint16 {
 	if reg.size == 16 {
 		return registerValues[reg.fieldEncoding]
 	} else {
-		return registerValues[reg.fieldEncoding % 4]
+		val := registerValues[reg.fieldEncoding % 4]
+		switch reg.offset {
+			case 0:
+				val = val & 0x00FF
+			case 8:
+				val = (val & 0xFF00) >> 8
+			default:
+				panic(fmt.Sprintf("Invalid register offset. Register: %s, offset: %d", reg.name, reg.offset))
+		}
+		return val
 	}
 }
 
@@ -420,12 +443,12 @@ func updateRegister(reg Register,  value uint16) {
 	if reg.size == 16 {
 		registerValues[reg.fieldEncoding] =  uint16(value)
 	} else {
-		current := getRegisterValue(reg)
+		wideRegVal := registerValues[reg.fieldEncoding % 4]
 		var updated uint16
 		if reg.offset == 0 {
-			updated = (current & uint16(0xFF00)) | uint16(value)
+			updated = (wideRegVal & uint16(0xFF00)) | uint16(value)
 		} else {
-			updated = (current & uint16(0x00FF)) | uint16(value << 8)
+			updated = (wideRegVal & uint16(0x00FF)) | uint16(value << 8)
 		}
 		registerValues[reg.fieldEncoding] =  updated
 	}
@@ -544,36 +567,15 @@ func (op MovOp) execute() {
 		case REG_REG:
 			updateRegister(op.reg, getRegisterValue(op.otherReg))
 		case REG_MEM:
-			var memVal uint16
-			if op.reg.size == 8 {
-				memVal = load(op.effAddr.ResolveMemoryAddress(), 1)
-			} else {
-				memVal = load(op.effAddr.ResolveMemoryAddress(), 2)
-			}
-			updateRegister(op.reg, memVal)
+			updateRegister(op.reg, load(op.effAddr.ResolveMemoryAddress(), op.reg.size == 16))
 		case REG_IMM:
 			updateRegister(op.reg, op.immediate.value)
 		case MEM_REG:
-			var toStore uint16
-			regVal := getRegisterValue(op.reg)
-			memIdx := op.effAddr.ResolveMemoryAddress()
-			if op.reg.size == 8 {
-				switch op.reg.offset {
-					case 0:
-						toStore = regVal & 0x00FF
-					case 8:
-						toStore = regVal & 0xFF00
-					default:
-						panic(fmt.Sprintf("Invalid register offset. Register: %s, offset: %d", op.reg.name, op.reg.offset))
-				}
-				store(memIdx, toStore, false)
-			} else {
-				toStore = regVal
-				store(memIdx, toStore, true)
-			}
+			store(op.effAddr.ResolveMemoryAddress(), getRegisterValue(op.reg), op.reg.size == 16)
 		case MEM_IMM:
-			memIdx := op.effAddr.ResolveMemoryAddress()
-			store(memIdx, op.immediate.value, op.immediate.size > 1)
+			store(op.effAddr.ResolveMemoryAddress(), op.immediate.value, op.immediate.size == 2)
+		default:
+			panic("Unexpected Error")
 	}
 }
 
@@ -819,6 +821,7 @@ func decode(filename string) {
 	}
 	fmt.Printf("bits 16\n\n")
 	streamSize := uint16(len(data))
+	i := 0
 	for ip < streamSize {
 		ipStart := ip
 		var jmpOp JumpOp
@@ -911,6 +914,10 @@ func decode(filename string) {
 			panic(fmt.Sprintf("Unmatched op: %b\n", data[ip]))
 		}
 		fmt.Printf(" ; IP: %d->%d\n", ipStart, ip)
+		i++
+		if i > 100 {
+			panic("Stopping after 10 instructions")
+		}
 	}
 
 }
@@ -924,15 +931,7 @@ func printFlags() {
 	}
 }
 
-
-func main() {
-	if len(os.Args) < 2 {
-		fmt.Println("Usage: go run part1.go <filename>")
-		return
-	}
-	filename := os.Args[1]
-	decode(filename)
-	fmt.Printf("Final registers:\n")
+func printRegVals() {
 	if registerValues[0] != 0 {
 		fmt.Printf("      ax: 0x%04X (%d)\n", registerValues[0], registerValues[0])
 	}
@@ -957,6 +956,17 @@ func main() {
 	if registerValues[7] != 0 {
 		fmt.Printf("      di: 0x%04X (%d)\n", registerValues[7], registerValues[7])
 	}
+}
+
+func main() {
+	if len(os.Args) < 2 {
+		fmt.Println("Usage: go run part1.go <filename>")
+		return
+	}
+	filename := os.Args[1]
+	decode(filename)
+	fmt.Printf("Final registers:\n")
+	printRegVals()
 	fmt.Printf("      ip: 0x%04X (%d)\n", ip, ip)
 	fmt.Printf("   flags: ")
 	printFlags()
