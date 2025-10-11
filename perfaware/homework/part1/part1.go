@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	// "flag"
 )
 
 const DEBUG = false
@@ -20,7 +21,6 @@ type Flags struct {
 }
 
 type EffectiveAddress struct {
-	 base string
 	 reg1 Register
 	 reg2 Register
 	 disp uint16
@@ -52,6 +52,37 @@ func (ea EffectiveAddress) String() string {
 	}
 	s += "]"
 	return s
+}
+
+func (ea EffectiveAddress) Cost() uint8 {
+	if ea.reg1.name == "" && ea.reg2.name == "" {
+		// Displacement only
+		return 6
+	}
+	if ea.reg1.name != "" {
+		if ea.reg2.name == "" {
+			if ea.dispSize == 0 || ea.disp == 0 {
+				// Base or index only
+				return 5
+			} else {
+				return 9
+			}
+		} else {
+			var initialCost uint8
+	 		if ea.dispSize == 0 {
+				// Base + index
+				initialCost = 7
+			} else {
+				// Base + index + disp
+				initialCost = 11
+			}
+			if (ea.reg1.name == "bp" && ea.reg2.name == "si") || (ea.reg1.name == "bx" && ea.reg2.name == "di") {
+				return initialCost + 1
+			}
+			return initialCost
+		}
+	}
+	return 0
 }
 
 
@@ -113,7 +144,38 @@ func (op ArithmeticOp) String() string {
 	}
 }
 
-func (op ArithmeticOp) execute() {
+func (op ArithmeticOp) Cost() uint8 {
+	switch op.opType {
+		case Add:
+		case Sub:
+		case Cmp:
+	}
+	switch op.variant {
+		case REG_REG:
+			return 3
+		case REG_MEM:
+			return 9 + op.otherEffAddr.Cost()
+		case MEM_REG:
+			if op.variant == Cmp {
+				return 9 + op.otherEffAddr.Cost()
+			} else {
+				return 16 + op.otherEffAddr.Cost()
+			}
+		case REG_IMM:
+			return 4
+		case MEM_IMM:
+			if op.variant == Cmp {
+				return 10 + op.otherEffAddr.Cost()
+			} else {
+				return 17 + op.otherEffAddr.Cost()
+			}
+		default:
+			panic("Unexpected Error")
+	}
+}
+
+
+func (op ArithmeticOp) execute() uint8 {
 	var operand1 uint16
 	var operand2 uint16
 	var result uint16
@@ -160,6 +222,7 @@ func (op ArithmeticOp) execute() {
 	}
 	flagValues.zero = result == 0
 	flagValues.sign = result & 0x8000 > 0
+	return op.Cost()
 }
 
 func doOp(opType ArithmeticOpType, lhs uint16, rhs uint16) uint16 {
@@ -208,10 +271,26 @@ type JumpOp struct {
 }
 
 func (op JumpOp) String() string {
-	return fmt.Sprintf("%s %d", getJumpOpName(op), op.disp)
+	return fmt.Sprintf("%s %d", jumpOpName[op.opType], op.disp)
 }
 
-func (op JumpOp) execute() {
+func (op JumpOp) Cost(taken bool) uint8 {
+	if taken {
+		if op.opType == JCXZ {
+			return 18
+		} else {
+			return 16
+		}
+	} else {
+		if op.opType == JCXZ {
+			return 8
+		} else {
+			return 4
+		}
+	}
+}
+
+func (op JumpOp) execute() uint8 {
 	switch (op.opType) {
 	case JNZ:
 		if !flagValues.zero {
@@ -219,7 +298,9 @@ func (op JumpOp) execute() {
 			// fmt.Printf("disp: %d\n", int(op.disp))
 			ip += uint16(op.disp)
 			// fmt.Printf("IP: %d, %x\n", ip, ip)
+			return op.Cost(true)
 		}
+		return op.Cost(false)
 	default:
 		panic("Not implemented")
 	}
@@ -503,13 +584,6 @@ func getImmediate(startIdx uint16, data []byte, wide bool) Immediate {
 	}
 }
 
-func getOtherString(otherReg Register, otherEffAddr EffectiveAddress) string {
-	if otherReg.name ==  "" {
-		return otherEffAddr.String()
-	} else {
-		return otherReg.name
-	}
-}
 
 type Immediate struct {
 	value uint16
@@ -544,12 +618,12 @@ func (op MovOp) String() string {
 		case REG_MEM:
 			dst = op.reg.name
 			src = op.effAddr.String()
-		case REG_IMM:
-			dst = op.reg.name
-			src = fmt.Sprintf("%d", op.immediate.value)
 		case MEM_REG:
 			dst = op.effAddr.String()
 			src = op.reg.name
+		case REG_IMM:
+			dst = op.reg.name
+			src = fmt.Sprintf("%d", op.immediate.value)
 		case MEM_IMM:
 			dst = op.effAddr.String()
 			src = fmt.Sprintf("%d", op.immediate.value)
@@ -562,7 +636,24 @@ func (op MovOp) String() string {
 	return fmt.Sprintf("mov%s %s, %s", clarifier, dst, src)
 }
 
-func (op MovOp) execute() {
+func (op MovOp) Cost() uint8 {
+	switch op.variant {
+		case REG_REG:
+			return 2
+		case REG_MEM:
+			return 8 + op.effAddr.Cost()
+		case MEM_REG:
+			return 9 + op.effAddr.Cost()
+		case REG_IMM:
+			return 4
+		case MEM_IMM:
+			return 10 + op.effAddr.Cost()
+		default:
+			panic("Unexpected Error")
+	}
+}
+
+func (op MovOp) execute() uint8 {
 	switch (op.variant) {
 		case REG_REG:
 			updateRegister(op.reg, getRegisterValue(op.otherReg))
@@ -577,6 +668,7 @@ func (op MovOp) execute() {
 		default:
 			panic("Unexpected Error")
 	}
+	return op.Cost()
 }
 
 func acceptRegMemMov(startIdx uint16, data []byte) MovOp {
@@ -813,7 +905,7 @@ func acceptCondJump(startIdx uint16, data []byte, opType JmpOpType) JumpOp {
 	return op
 }
 
-func decode(filename string) {
+func simulate(filename string) {
 	data, err := os.ReadFile(filename)
 	if err != nil {
 		fmt.Println("Error reading file:", err)
@@ -822,6 +914,7 @@ func decode(filename string) {
 	fmt.Printf("bits 16\n\n")
 	streamSize := uint16(len(data))
 	i := 0
+	var totalCost uint16 = 0
 	for ip < streamSize {
 		ipStart := ip
 		var jmpOp JumpOp
@@ -903,23 +996,26 @@ func decode(filename string) {
 			panic(fmt.Sprintf("Unmatched op: %b\n", data[ip]))
 		}
 		ip += uint16(bytesConsumed)
+		var opCost uint8
 		if jmpOp.size != 0 {
-			jmpOp.execute()
+			opCost = jmpOp.execute()
+			totalCost += uint16(opCost)
 		} else if movOp.size != 0 {
-			movOp.execute()
+			opCost = movOp.execute()
+			totalCost += uint16(opCost)
 		} else if arithmeticOp.size != 0 {
-			arithmeticOp.execute()
+			opCost = arithmeticOp.execute()
+			totalCost += uint16(opCost)
 		} else {
 			fmt.Printf("%b\n", data[ip])
 			panic(fmt.Sprintf("Unmatched op: %b\n", data[ip]))
 		}
-		fmt.Printf(" ; IP: %d->%d\n", ipStart, ip)
+		fmt.Printf(" ; IP: %d->%d; Cost: +%d = %d\n", ipStart, ip, opCost, totalCost)
 		i++
-		if i > 100 {
-			panic("Stopping after 10 instructions")
-		}
+		// if i > 1000 {
+		// 	panic("Stopping after 1000 instructions")
+		// }
 	}
-
 }
 
 func printFlags() {
@@ -959,16 +1055,27 @@ func printRegVals() {
 }
 
 func main() {
-	if len(os.Args) < 2 {
+	// dumpPtr := flag.Bool("dump", false, "Dump memory after execution")
+	// posArgs := flag.Args()
+	// flag.Parse()
+	// fmt.Println(*dumpPtr)
+	// fmt.Println(posArgs)
+	// fmt.Println(os.Args)
+	//
+	if len(os.Args) < 1 {
 		fmt.Println("Usage: go run part1.go <filename>")
 		return
 	}
 	filename := os.Args[1]
-	decode(filename)
+	simulate(filename)
 	fmt.Printf("Final registers:\n")
 	printRegVals()
 	fmt.Printf("      ip: 0x%04X (%d)\n", ip, ip)
 	fmt.Printf("   flags: ")
 	printFlags()
 	fmt.Println()
+	// if *dumpPtr {
+	fmt.Println("Dumping memory state")
+	os.WriteFile("/tmp/sim86-dump.data", memory[:], 0644)
+	// }
 }
